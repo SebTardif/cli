@@ -55,6 +55,7 @@ type ApiOptions struct {
 	Paginate            bool
 	Slurp               bool
 	Silent              bool
+	Batch               bool
 	Template            string
 	CacheTTL            time.Duration
 	FilterOutput        string
@@ -209,6 +210,12 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 			  }
 			' | jq 'def count(e): reduce e as $_ (0;.+1);
 			[.[].data.viewer.repositories.nodes[]] as $r | count(select($r[].isFork))/count($r[])'
+
+			# Batch: fetch multiple endpoints in one invocation (reuses HTTP connection)
+			$ printf "repos/{owner}/{repo}\nrepos/{owner}/{repo}/issues?per_page=1" | gh api --batch
+
+			# Batch with jq: extract specific fields from each response
+			$ printf "repos/cli/cli\nrepos/cli/cli/issues/1" | gh api --batch --jq '.full_name // .title'
 		`),
 		Annotations: map[string]string{
 			"help:environment": heredoc.Docf(`
@@ -221,12 +228,20 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 				GH_HOST: make the request to a GitHub host other than %[1]sgithub.com%[1]s.
 			`, "`"),
 		},
-		Args: cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			batchFlag, _ := cmd.Flags().GetBool("batch")
+			if batchFlag {
+				return cobra.ExactArgs(0)(cmd, args)
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		PreRun: func(c *cobra.Command, args []string) {
 			opts.BaseRepo = cmdutil.OverrideBaseRepoFunc(f.BaseRepo, "")
 		},
 		RunE: func(c *cobra.Command, args []string) error {
-			opts.RequestPath = args[0]
+			if !opts.Batch {
+				opts.RequestPath = args[0]
+			}
 			opts.RequestMethodPassed = c.Flags().Changed("method")
 
 			if runtime.GOOS == "windows" && filepath.IsAbs(opts.RequestPath) {
@@ -236,6 +251,23 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 			if c.Flags().Changed("hostname") {
 				if err := ghinstance.HostnameValidator(opts.Hostname); err != nil {
 					return cmdutil.FlagErrorf("error parsing `--hostname`: %w", err)
+				}
+			}
+
+			if opts.Batch {
+				if err := cmdutil.MutuallyExclusive(
+					"the `--batch` option is not supported with `--paginate`",
+					opts.Batch,
+					opts.Paginate,
+				); err != nil {
+					return err
+				}
+				if err := cmdutil.MutuallyExclusive(
+					"the `--batch` option is not supported with `--input`",
+					opts.Batch,
+					opts.RequestInputFile != "",
+				); err != nil {
+					return err
 				}
 			}
 
@@ -298,6 +330,7 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 	cmd.Flags().StringVarP(&opts.FilterOutput, "jq", "q", "", "Query to select values from the response using jq syntax")
 	cmd.Flags().DurationVar(&opts.CacheTTL, "cache", 0, "Cache the response, e.g. \"3600s\", \"60m\", \"1h\"")
 	cmd.Flags().BoolVar(&opts.Verbose, "verbose", false, "Include full HTTP request and response in the output")
+	cmd.Flags().BoolVar(&opts.Batch, "batch", false, "Read newline-separated API endpoints from standard input and make requests using a shared HTTP connection")
 	return cmd
 }
 
@@ -415,6 +448,10 @@ func apiRun(opts *ApiOptions) error {
 		return err
 	}
 
+	if opts.Batch {
+		return apiBatchRun(opts, httpClient, host, bodyWriter, headersWriter, tmpl)
+	}
+
 	isFirstPage := true
 	hasNextPage := true
 	for hasNextPage {
@@ -457,6 +494,70 @@ func apiRun(opts *ApiOptions) error {
 	}
 
 	return tmpl.Flush()
+}
+
+func apiBatchRun(opts *ApiOptions, httpClient *http.Client, host string, bodyWriter, headersWriter io.Writer, tmpl *template.Template) error {
+	requests, err := parseBatchInput(opts.IO.In)
+	if err != nil {
+		return err
+	}
+
+	if len(requests) == 0 {
+		return nil
+	}
+
+	var hasError bool
+	for _, req := range requests {
+		reqPath, err := fillPlaceholders(req.URL, opts)
+		if err != nil {
+			return fmt.Errorf("unable to expand placeholder in path %q: %w", req.URL, err)
+		}
+
+		var reqHeaders []string
+		reqHeaders = append(reqHeaders, opts.RequestHeaders...)
+		for k, v := range req.Headers {
+			reqHeaders = append(reqHeaders, fmt.Sprintf("%s: %s", k, v))
+		}
+
+		var reqBody interface{}
+		if req.Body != nil {
+			reqBody = req.Body
+		}
+
+		resp, err := httpRequest(httpClient, host, req.Method, reqPath, reqBody, reqHeaders)
+		if err != nil {
+			return err
+		}
+
+		if opts.FilterOutput != "" || opts.Template != "" {
+			_, err = processResponse(resp, opts, bodyWriter, headersWriter, tmpl, true, true)
+			if err != nil {
+				return err
+			}
+		} else {
+			respBody, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				return err
+			}
+			if err := writeBatchResponse(bodyWriter, resp.StatusCode, reqPath, respBody); err != nil {
+				return err
+			}
+		}
+
+		if resp.StatusCode > 299 {
+			hasError = true
+		}
+	}
+
+	if err := tmpl.Flush(); err != nil {
+		return err
+	}
+
+	if hasError {
+		return cmdutil.SilentError
+	}
+	return nil
 }
 
 var jsonContentTypeRE = regexp.MustCompile(`[/+]json(;|$)`)

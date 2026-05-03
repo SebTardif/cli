@@ -1827,3 +1827,122 @@ func Test_apiRun_acceptHeader(t *testing.T) {
 		})
 	}
 }
+
+func Test_apiRun_batch(t *testing.T) {
+	ios, stdin, stdout, stderr := iostreams.Test()
+
+	requestCount := 0
+	var gotPaths []string
+
+	stdin.WriteString("repos/cli/cli\nrepos/cli/cli/issues/1\n")
+
+	err := apiRun(&ApiOptions{
+		IO: ios,
+		Config: func() (gh.Config, error) {
+			return config.NewBlankConfig(), nil
+		},
+		HttpClient: func() (*http.Client, error) {
+			var tr roundTripper = func(req *http.Request) (*http.Response, error) {
+				requestCount++
+				gotPaths = append(gotPaths, req.URL.Path)
+
+				var body string
+				switch {
+				case strings.HasSuffix(req.URL.Path, "/cli/cli"):
+					body = `{"full_name":"cli/cli"}`
+				case strings.HasSuffix(req.URL.Path, "/issues/1"):
+					body = `{"title":"Bug report"}`
+				}
+
+				return &http.Response{
+					StatusCode: 200,
+					Request:    req,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewBufferString(body)),
+				}, nil
+			}
+			return &http.Client{Transport: tr}, nil
+		},
+		Batch:         true,
+		RequestMethod: "GET",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "", stderr.String())
+	assert.Equal(t, 2, requestCount)
+	assert.Contains(t, stdout.String(), `"full_name":"cli/cli"`)
+	assert.Contains(t, stdout.String(), `"title":"Bug report"`)
+}
+
+func Test_apiRun_batch_withJq(t *testing.T) {
+	ios, stdin, stdout, stderr := iostreams.Test()
+
+	stdin.WriteString("repos/cli/cli\nrepos/cli/cli/issues/1\n")
+
+	err := apiRun(&ApiOptions{
+		IO: ios,
+		Config: func() (gh.Config, error) {
+			return config.NewBlankConfig(), nil
+		},
+		HttpClient: func() (*http.Client, error) {
+			var tr roundTripper = func(req *http.Request) (*http.Response, error) {
+				var body string
+				switch {
+				case strings.HasSuffix(req.URL.Path, "/cli/cli"):
+					body = `{"full_name":"cli/cli"}`
+				case strings.HasSuffix(req.URL.Path, "/issues/1"):
+					body = `{"title":"Bug report"}`
+				}
+				return &http.Response{
+					StatusCode: 200,
+					Request:    req,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewBufferString(body)),
+				}, nil
+			}
+			return &http.Client{Transport: tr}, nil
+		},
+		Batch:         true,
+		RequestMethod: "GET",
+		FilterOutput:  ".full_name // .title",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "", stderr.String())
+	assert.Contains(t, stdout.String(), "cli/cli")
+	assert.Contains(t, stdout.String(), "Bug report")
+}
+
+func Test_apiRun_batch_withError(t *testing.T) {
+	ios, stdin, _, _ := iostreams.Test()
+
+	stdin.WriteString("repos/cli/nonexistent\n")
+
+	err := apiRun(&ApiOptions{
+		IO: ios,
+		Config: func() (gh.Config, error) {
+			return config.NewBlankConfig(), nil
+		},
+		HttpClient: func() (*http.Client, error) {
+			var tr roundTripper = func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: 404,
+					Request:    req,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewBufferString(`{"message":"Not Found"}`)),
+				}, nil
+			}
+			return &http.Client{Transport: tr}, nil
+		},
+		Batch:         true,
+		RequestMethod: "GET",
+	})
+	assert.Equal(t, cmdutil.SilentError, err)
+}
+
+func Test_NewCmdApi_batch_flag(t *testing.T) {
+	f := &cmdutil.Factory{}
+	cmd := NewCmdApi(f, nil)
+
+	batchFlag := cmd.Flags().Lookup("batch")
+	assert.NotNil(t, batchFlag)
+	assert.Equal(t, "false", batchFlag.DefValue)
+}
