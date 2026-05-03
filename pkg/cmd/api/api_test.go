@@ -1946,3 +1946,122 @@ func Test_NewCmdApi_batch_flag(t *testing.T) {
 	assert.NotNil(t, batchFlag)
 	assert.Equal(t, "false", batchFlag.DefValue)
 }
+
+func Test_apiRun_select(t *testing.T) {
+	ios, _, stdout, stderr := iostreams.Test()
+
+	err := apiRun(&ApiOptions{
+		IO: ios,
+		Config: func() (gh.Config, error) {
+			return config.NewBlankConfig(), nil
+		},
+		HttpClient: func() (*http.Client, error) {
+			var tr roundTripper = func(req *http.Request) (*http.Response, error) {
+				// Verify GraphQL endpoint was used
+				assert.Contains(t, req.URL.Path, "graphql")
+
+				body := `{"data":{"repository":{"name":"cli","defaultBranchRef":{"name":"trunk"}}}}`
+				return &http.Response{
+					StatusCode: 200,
+					Request:    req,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewBufferString(body)),
+				}, nil
+			}
+			return &http.Client{Transport: tr}, nil
+		},
+		RequestPath:   "repos/cli/cli",
+		RequestMethod: "GET",
+		SelectFields:  []string{"name", "defaultBranchRef"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "", stderr.String())
+	assert.Contains(t, stdout.String(), `"name"`)
+	assert.Contains(t, stdout.String(), `"trunk"`)
+	// Verify the GraphQL envelope was unwrapped
+	assert.NotContains(t, stdout.String(), `"data"`)
+}
+
+func Test_apiRun_select_withJq(t *testing.T) {
+	ios, _, stdout, _ := iostreams.Test()
+
+	err := apiRun(&ApiOptions{
+		IO: ios,
+		Config: func() (gh.Config, error) {
+			return config.NewBlankConfig(), nil
+		},
+		HttpClient: func() (*http.Client, error) {
+			var tr roundTripper = func(req *http.Request) (*http.Response, error) {
+				body := `{"data":{"repository":{"defaultBranchRef":{"name":"trunk"}}}}`
+				return &http.Response{
+					StatusCode: 200,
+					Request:    req,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewBufferString(body)),
+				}, nil
+			}
+			return &http.Client{Transport: tr}, nil
+		},
+		RequestPath:   "repos/cli/cli",
+		RequestMethod: "GET",
+		SelectFields:  []string{"defaultBranchRef"},
+		FilterOutput:  ".defaultBranchRef.name",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, stdout.String(), "trunk")
+}
+
+func Test_apiRun_select_issue(t *testing.T) {
+	ios, _, stdout, _ := iostreams.Test()
+
+	err := apiRun(&ApiOptions{
+		IO: ios,
+		Config: func() (gh.Config, error) {
+			return config.NewBlankConfig(), nil
+		},
+		HttpClient: func() (*http.Client, error) {
+			var tr roundTripper = func(req *http.Request) (*http.Response, error) {
+				body := `{"data":{"repository":{"issue":{"title":"Bug report","state":"OPEN"}}}}`
+				return &http.Response{
+					StatusCode: 200,
+					Request:    req,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewBufferString(body)),
+				}, nil
+			}
+			return &http.Client{Transport: tr}, nil
+		},
+		RequestPath:   "repos/cli/cli/issues/42",
+		RequestMethod: "GET",
+		SelectFields:  []string{"title", "state"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, stdout.String(), "Bug report")
+	assert.Contains(t, stdout.String(), "OPEN")
+}
+
+func Test_apiRun_select_unsupportedEndpoint(t *testing.T) {
+	ios, _, _, _ := iostreams.Test()
+
+	err := apiRun(&ApiOptions{
+		IO: ios,
+		Config: func() (gh.Config, error) {
+			return config.NewBlankConfig(), nil
+		},
+		HttpClient: func() (*http.Client, error) {
+			return &http.Client{}, nil
+		},
+		RequestPath:   "users/octocat",
+		RequestMethod: "GET",
+		SelectFields:  []string{"login"},
+	})
+	assert.ErrorContains(t, err, "--select is not supported for endpoint")
+}
+
+func Test_NewCmdApi_select_flag(t *testing.T) {
+	f := &cmdutil.Factory{}
+	cmd := NewCmdApi(f, nil)
+
+	selectFlag := cmd.Flags().Lookup("select")
+	assert.NotNil(t, selectFlag)
+}

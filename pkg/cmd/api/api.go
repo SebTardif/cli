@@ -56,6 +56,7 @@ type ApiOptions struct {
 	Slurp               bool
 	Silent              bool
 	Batch               bool
+	SelectFields        []string
 	Template            string
 	CacheTTL            time.Duration
 	FilterOutput        string
@@ -216,6 +217,15 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 
 			# Batch with jq: extract specific fields from each response
 			$ printf "repos/cli/cli\nrepos/cli/cli/issues/1" | gh api --batch --jq '.full_name // .title'
+
+			# Server-side field selection: fetch only specific fields via GraphQL
+			$ gh api repos/{owner}/{repo} --select name,defaultBranchRef
+
+			# Combine --select with --jq for minimal data transfer
+			$ gh api repos/{owner}/{repo} --select defaultBranchRef --jq '.defaultBranchRef.name'
+
+			# Select specific issue fields
+			$ gh api repos/{owner}/{repo}/issues/42 --select title,state,labels
 		`),
 		Annotations: map[string]string{
 			"help:environment": heredoc.Docf(`
@@ -266,6 +276,23 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 					"the `--batch` option is not supported with `--input`",
 					opts.Batch,
 					opts.RequestInputFile != "",
+				); err != nil {
+					return err
+				}
+			}
+
+			if len(opts.SelectFields) > 0 {
+				if err := cmdutil.MutuallyExclusive(
+					"the `--select` option is not supported with `--batch`",
+					len(opts.SelectFields) > 0,
+					opts.Batch,
+				); err != nil {
+					return err
+				}
+				if err := cmdutil.MutuallyExclusive(
+					"the `--select` option is not supported with `--paginate`",
+					len(opts.SelectFields) > 0,
+					opts.Paginate,
 				); err != nil {
 					return err
 				}
@@ -331,6 +358,7 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 	cmd.Flags().DurationVar(&opts.CacheTTL, "cache", 0, "Cache the response, e.g. \"3600s\", \"60m\", \"1h\"")
 	cmd.Flags().BoolVar(&opts.Verbose, "verbose", false, "Include full HTTP request and response in the output")
 	cmd.Flags().BoolVar(&opts.Batch, "batch", false, "Read newline-separated API endpoints from standard input and make requests using a shared HTTP connection")
+	cmd.Flags().StringSliceVar(&opts.SelectFields, "select", nil, "Fetch only the specified `fields` using a server-side GraphQL query instead of REST (supported for repos, issues, pulls)")
 	return cmd
 }
 
@@ -452,6 +480,10 @@ func apiRun(opts *ApiOptions) error {
 		return apiBatchRun(opts, httpClient, host, bodyWriter, headersWriter, tmpl)
 	}
 
+	if len(opts.SelectFields) > 0 {
+		return apiSelectRun(opts, httpClient, host, requestPath, requestHeaders, bodyWriter, headersWriter, tmpl)
+	}
+
 	isFirstPage := true
 	hasNextPage := true
 	for hasNextPage {
@@ -558,6 +590,46 @@ func apiBatchRun(opts *ApiOptions, httpClient *http.Client, host string, bodyWri
 		return cmdutil.SilentError
 	}
 	return nil
+}
+
+func apiSelectRun(opts *ApiOptions, httpClient *http.Client, host string, requestPath string, requestHeaders []string, bodyWriter, headersWriter io.Writer, tmpl *template.Template) error {
+	query, variables, dataPath, err := buildSelectQuery(requestPath, opts.SelectFields)
+	if err != nil {
+		return err
+	}
+
+	body := map[string]interface{}{
+		"query":     query,
+		"variables": variables,
+	}
+
+	resp, err := httpRequest(httpClient, host, "POST", "graphql", body, requestHeaders)
+	if err != nil {
+		return err
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return err
+	}
+
+	unwrapped, err := unwrapGraphQLData(respBody, dataPath)
+	if err != nil {
+		return err
+	}
+
+	// Create a synthetic response with the unwrapped body so that
+	// processResponse handles --jq, --template, and output formatting.
+	resp.Body = io.NopCloser(bytes.NewReader(unwrapped))
+	resp.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	_, err = processResponse(resp, opts, bodyWriter, headersWriter, tmpl, true, true)
+	if err != nil {
+		return err
+	}
+
+	return tmpl.Flush()
 }
 
 var jsonContentTypeRE = regexp.MustCompile(`[/+]json(;|$)`)
