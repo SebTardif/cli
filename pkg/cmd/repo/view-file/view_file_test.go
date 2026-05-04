@@ -161,6 +161,11 @@ func TestNewCmdViewFile(t *testing.T) {
 			args:    []string{"file1", "file2"},
 			wantErr: true,
 		},
+		{
+			name:    "with repo override",
+			args:    []string{"README.md", "-R", "cli/cli"},
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

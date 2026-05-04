@@ -170,6 +170,11 @@ func TestNewCmdLsFiles(t *testing.T) {
 			args:    []string{"src/", "pkg/"},
 			wantErr: true,
 		},
+		{
+			name:    "with repo override",
+			args:    []string{"-R", "cli/cli"},
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

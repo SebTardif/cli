@@ -27,7 +27,7 @@ type TreeEntry struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 	Type string `json:"type"`
-	Size int    `json:"size,omitempty"`
+	Size *int   `json:"size,omitempty"`
 }
 
 var treeEntryFields = []string{"name", "path", "type", "size"}
@@ -36,7 +36,6 @@ func NewCmdLsFiles(f *cmdutil.Factory, runF func(*LsFilesOptions) error) *cobra.
 	opts := &LsFilesOptions{
 		IO:         f.IOStreams,
 		HttpClient: f.HttpClient,
-		BaseRepo:   f.BaseRepo,
 	}
 
 	cmd := &cobra.Command{
@@ -73,10 +72,7 @@ func NewCmdLsFiles(f *cmdutil.Factory, runF func(*LsFilesOptions) error) *cobra.
 			if len(args) > 0 {
 				opts.Path = args[0]
 			}
-
-			if repoOverride, _ := c.Flags().GetString("repo"); repoOverride != "" {
-				opts.BaseRepo = cmdutil.OverrideBaseRepoFunc(f.BaseRepo, repoOverride)
-			}
+			opts.BaseRepo = f.BaseRepo
 
 			if runF != nil {
 				return runF(opts)
@@ -87,6 +83,7 @@ func NewCmdLsFiles(f *cmdutil.Factory, runF func(*LsFilesOptions) error) *cobra.
 
 	cmd.Flags().StringVar(&opts.Ref, "ref", "", "The branch, tag, or commit SHA to list files from")
 	cmdutil.AddJSONFlags(cmd, &opts.Exporter, treeEntryFields)
+	cmdutil.EnableRepoOverride(cmd, f)
 
 	return cmd
 }
@@ -180,7 +177,8 @@ func lsFilesRun(opts *LsFilesOptions) error {
 			Type: e.Type,
 		}
 		if e.Object != nil {
-			entry.Size = e.Object.ByteSize
+			size := e.Object.ByteSize
+			entry.Size = &size
 		}
 		entries = append(entries, entry)
 	}
@@ -202,7 +200,6 @@ func lsFilesRun(opts *LsFilesOptions) error {
 	return nil
 }
 
-// Implement cmdutil.Exportable for []TreeEntry
 func (e TreeEntry) ExportData(fields []string) map[string]interface{} {
 	data := map[string]interface{}{}
 	for _, f := range fields {
@@ -220,17 +217,17 @@ func (e TreeEntry) ExportData(fields []string) map[string]interface{} {
 	return data
 }
 
-// MarshalJSON for TreeEntry.
 func (e TreeEntry) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
+	v := struct {
 		Name string `json:"name"`
 		Path string `json:"path"`
 		Type string `json:"type"`
-		Size int    `json:"size,omitempty"`
+		Size *int   `json:"size,omitempty"`
 	}{
 		Name: e.Name,
 		Path: e.Path,
 		Type: e.Type,
 		Size: e.Size,
-	})
+	}
+	return json.Marshal(v)
 }

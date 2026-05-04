@@ -25,7 +25,6 @@ func NewCmdViewFile(f *cmdutil.Factory, runF func(*ViewFileOptions) error) *cobr
 	opts := &ViewFileOptions{
 		IO:         f.IOStreams,
 		HttpClient: f.HttpClient,
-		BaseRepo:   f.BaseRepo,
 	}
 
 	cmd := &cobra.Command{
@@ -59,10 +58,7 @@ func NewCmdViewFile(f *cmdutil.Factory, runF func(*ViewFileOptions) error) *cobr
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			opts.Path = args[0]
-
-			if repoOverride, _ := c.Flags().GetString("repo"); repoOverride != "" {
-				opts.BaseRepo = cmdutil.OverrideBaseRepoFunc(f.BaseRepo, repoOverride)
-			}
+			opts.BaseRepo = f.BaseRepo
 
 			if runF != nil {
 				return runF(opts)
@@ -72,6 +68,7 @@ func NewCmdViewFile(f *cmdutil.Factory, runF func(*ViewFileOptions) error) *cobr
 	}
 
 	cmd.Flags().StringVar(&opts.Ref, "ref", "", "The branch, tag, or commit SHA to view the file from")
+	cmdutil.EnableRepoOverride(cmd, f)
 
 	return cmd
 }
@@ -142,6 +139,11 @@ func viewFileRun(opts *ViewFileOptions) error {
 	if obj.IsBinary {
 		return fmt.Errorf("file is binary (%d bytes): %s", obj.ByteSize, opts.Path)
 	}
+
+	if err := opts.IO.StartPager(); err != nil {
+		return err
+	}
+	defer opts.IO.StopPager()
 
 	_, err = fmt.Fprint(opts.IO.Out, obj.Text)
 	return err
